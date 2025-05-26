@@ -1,17 +1,54 @@
-cabal-version:   3.0
+cabal-version:   3.6
 name:            lspipe
 version:         0.1.0.0
 license:         NONE
-author:          Joe
-maintainer:      joe@lspipe.com
+author:          Kristian Alvestad Nedrevold-Hansen
+maintainer:      kristiananh@proton.me
 build-type:      Simple
 
-common warnings
+common settings
     ghc-options: -Wall
+    default-language: GHC2021
 
+library
+  import: settings
+  hs-source-dirs: lib
+  build-depends:
+      base
+    , text
+    , bytestring
+    , containers
+    , effectful
+    , aeson
+    , optparse-applicative
+  exposed-modules:
+  other-modules:
+    Lsp.LspRequest
+    Lsp.LspResponse
+    Lsp.Rpc
+    Lsp.Proxy
+    Cli
+    
 executable lspipe
-    import:           warnings
+    import:           settings
     main-is:          Main.hs
-    build-depends:    base
-    hs-source-dirs:   src
-    default-language: Haskell2010
+    build-depends:
+        base
+      , lspipe
+    hs-source-dirs:   app
+
+test-suite lspipe-tests 
+  import: settings
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  hs-source-dirs: test
+  build-tool-depends: hspec-discover:hspec-discover == 2.*
+  other-modules:
+  build-depends:
+      base
+    , text
+    , hspec 
+    , hspec-contrib
+    , lspipe
+    
+
