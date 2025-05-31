@@ -51,7 +51,7 @@ rpcRead handle = recur Nothing
     parseHeaderLine :: (FileSystem :> es, Error LspError :> es) => BSC.ByteString -> Maybe Int -> Eff es T.Text
     parseHeaderLine lineStr mContentLength = do
         let line = TE.decodeUtf8 lineStr
-        let effectiveLine = fromMaybe line (T.stripSuffix line (T.pack "\r")) -- Remove trailing \r if present
+        let effectiveLine = fromMaybe line (T.stripSuffix (T.pack "\r") line) -- Remove trailing \r if present
         let (headerName, restOfHeader) = T.breakOn (T.pack ":") effectiveLine
 
         if T.null restOfHeader || not (T.isPrefixOf (T.pack ":") restOfHeader)

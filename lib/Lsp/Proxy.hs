@@ -1,10 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-module Lsp.Proxy (runApp) where
+{-# HLINT ignore "Use traverse_" #-}
 
-import Cli (Command (..))
+module Lsp.Proxy (runApp, Command (..)) where
+
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as BL
+import Data.Foldable (traverse_)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Effectful
@@ -12,33 +15,38 @@ import Effectful.Concurrent.Async (withAsync)
 import Effectful.Concurrent.STM
 import Effectful.Error.Static
 import Effectful.FileSystem (FileSystem)
-import Effectful.FileSystem.IO (hSetBuffering, stdin, stdout)
+import Effectful.FileSystem.IO (hSetBuffering)
 import Effectful.Process (CreateProcess (..), Process, StdStream (..), createProcess, proc, waitForProcess)
+import Lsp.Agent qualified as Agent
 import Lsp.LspRequest qualified as LspReq
 import Lsp.LspResponse (LspResponseError (..))
 import Lsp.LspResponse qualified as LspR
 import Lsp.Rpc
-import System.Exit (ExitCode)
+import System.Exit (ExitCode (ExitSuccess))
 import System.IO (BufferMode (BlockBuffering), Handle)
+import Util.Logger
 
-processChannelToWriterUnbounded :: (Error LspError :> es, Concurrent :> es, FileSystem :> es) => TQueue T.Text -> Handle -> Eff es ()
-processChannelToWriterUnbounded queue writer = do
-    hSetBuffering writer (BlockBuffering Nothing)
+data Command = Command {command :: String, args :: [String]}
+
+data MessageQueue a = BoundedQueue (TBQueue a) | UnboundedQueue (TQueue a)
+
+-- TODO Inject logic for which queue we write to based on the server capabilities
+processChannelToWriter :: (Error LspError :> es, Concurrent :> es, FileSystem :> es) => MessageQueue T.Text -> [Handle] -> Eff es ()
+processChannelToWriter queue handles = do
+    traverse_ (\handle -> hSetBuffering handle (BlockBuffering Nothing)) handles
     write
   where
+    readFromWrappedQueue :: MessageQueue T.Text -> STM T.Text
+    readFromWrappedQueue aq = case aq of
+        UnboundedQueue tq -> readTQueue tq
+        BoundedQueue tbq -> readTBQueue tbq
     write = do
-        msg <- atomically $ readTQueue queue
-        rpcWrite writer msg
-        write
-
-processChannelToWriterBounded :: (Error LspError :> es, Concurrent :> es, FileSystem :> es) => TBQueue T.Text -> Handle -> Eff es ()
-processChannelToWriterBounded queue writer = do
-    hSetBuffering writer (BlockBuffering Nothing)
-    write
-  where
-    write = do
-        msg <- atomically $ readTBQueue queue
-        rpcWrite writer msg
+        msg <- atomically $ readFromWrappedQueue queue
+        traverse_
+            ( \writer -> do
+                rpcWrite writer msg
+            )
+            handles
         write
 
 decodeLspRequest :: (Error LspError :> es) => T.Text -> Eff es LspReq.LspRequest
@@ -90,21 +98,35 @@ proccessClientReader reader serverTBQueue clientTQueue = do
                 atomically $ writeTQueue clientTQueue (TE.decodeUtf8 (BL.toStrict (Aeson.encode lspResponse)))
                 processLoop
 
-processServerReader :: (Error LspError :> es, FileSystem :> es, Concurrent :> es) => Handle -> TQueue T.Text -> Eff es ()
-processServerReader reader queue = do
-    hSetBuffering reader (BlockBuffering Nothing)
-    process
+-- TODO here we need to merge the responses before we send them to the client
+processServerReader :: (Error LspError :> es, FileSystem :> es, Concurrent :> es) => [Agent.LspAgent] -> TQueue T.Text -> Eff es ()
+processServerReader agents queue = do
+    traverse_ (\agent -> hSetBuffering (Agent.stdout agent) (BlockBuffering Nothing)) agents
+    traverse_ (process . Agent.stdout) agents
   where
-    process = do
+    process reader = do
         message <- rpcRead reader
         if T.null message
             then pure ()
             else do
                 atomically $ writeTQueue queue message
-                process
+                process reader
 
-runApp :: (FileSystem :> es, Process :> es, Concurrent :> es, Error LspError :> es) => Handle -> Handle -> Command -> Eff es ExitCode
-runApp clientReader clientWriter serverCommand = do
+runApp :: (Logger :> es, FileSystem :> es, Process :> es, Concurrent :> es, Error LspError :> es) => Handle -> Handle -> [Command] -> Eff es ExitCode
+runApp clientReader clientWriter commands = do
+    logInfo "starting lspipe"
+    agents <- traverse setupAgent commands
+    let desiredCapacity = 128 :: Int
+    clientToServerChan <- atomically $ newTBQueue (fromIntegral desiredCapacity)
+    serverToClientChan <- atomically newTQueue
+    withAsync (processChannelToWriter (BoundedQueue clientToServerChan) (fmap Agent.stdin agents)) $ \_a1 ->
+        withAsync (processChannelToWriter (UnboundedQueue serverToClientChan) [clientWriter]) $ \_a2 ->
+            withAsync (processServerReader agents serverToClientChan) $ \_a3 ->
+                withAsync (proccessClientReader clientReader clientToServerChan serverToClientChan) $ \_a4 -> do
+                    traverse (waitForProcess . Agent.procHandle) agents >> pure ExitSuccess -- TODO find some way to handle the exit code properly
+
+setupAgent :: (Error LspError :> es, Process :> es) => Command -> Eff es Agent.LspAgent
+setupAgent serverCommand = do
     (maybeStdin, maybeStdout, _, procHandle) <-
         createProcess
             (proc (command serverCommand) (args serverCommand))
@@ -119,15 +141,11 @@ runApp clientReader clientWriter serverCommand = do
     stdOut <- case maybeStdout of
         Just h -> pure h
         Nothing -> throwError $ LspError "Failed to get stdout handle when starting lsp"
-    let desiredCapacity = 128 :: Int
-    clientToServerChan <- atomically $ newTBQueue (fromIntegral desiredCapacity)
-    serverToClientChan <- atomically newTQueue
-    withAsync (processChannelToWriterBounded clientToServerChan stdIn) $ \_a1 ->
-        withAsync (processChannelToWriterUnbounded serverToClientChan clientWriter) $ \_a2 ->
-            withAsync (processServerReader stdOut serverToClientChan) $ \_a3 ->
-                withAsync (proccessClientReader clientReader clientToServerChan serverToClientChan) $ \_a4 -> do
-                    waitForProcess procHandle
-
-runServer :: (FileSystem :> es, Error LspError :> es, Concurrent :> es, Process :> es) => [Command] -> Eff es ExitCode
-runServer commands = do
-    runApp stdin stdout (head commands)
+    pure
+        Agent.LspAgent
+            { Agent.stdout = stdOut
+            , Agent.stdin = stdIn
+            , Agent.capabilities = []
+            , Agent.agentId = T.pack (command serverCommand)
+            , Agent.procHandle = procHandle
+            }

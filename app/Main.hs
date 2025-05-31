@@ -1,4 +1,6 @@
 module Main where
 
+import Cli (runLspipe)
+
 main :: IO ()
-main = putStrLn "Hello, Haskell!"
+main = runLspipe

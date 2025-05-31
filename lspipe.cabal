@@ -21,13 +21,17 @@ library
     , effectful
     , aeson
     , optparse-applicative
+    , time
   exposed-modules:
+    Cli
   other-modules:
     Lsp.LspRequest
     Lsp.LspResponse
     Lsp.Rpc
     Lsp.Proxy
-    Cli
+    Lsp.Agent
+    Util.Logger
+
     
 executable lspipe
     import:           settings
