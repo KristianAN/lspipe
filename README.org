@@ -5,7 +5,7 @@ Lspipe aims to bring multi-lsp support for clients that only support one lsp per
 
 ** Key Features
 - 🔄 *Multi-LSP Support*: Connect multiple LSP servers simultaneously
-- ⚡ *Backpressure Control*: Automatic flow control to prevent system overload
+- ⚡ *Backpressure Control*: Bounded queues with intelligent overflow handling
 - 🧩 *Middleware Support*: Extensible architecture for request/response processing
 - 🏗️ *Concurrent Architecture*: Built with Haskell STM for high-performance concurrency
 - 🛡️ *Fault Tolerance*: Graceful handling of slow or unresponsive agents
@@ -20,11 +20,10 @@ Extremely WIP. Don't expect anything to work correctly yet.
     Client[LSP Client<br/>e.g., Emacs]
 
     subgraph LSPIPE["LSPIPE Multiplexer"]
-        PubChan[Publish Channel<br/>STM TChannel]
-        SubChan[Subscribe Channel<br/>STM TChannel]
-        ReqTracker[Request Tracker<br/>ID + Agent Count]
-        ResponseMap[Response Map<br/>Collects & Merges]
+        ClientToServer[Client→Server Queue<br/>STM TBQueue<br/>Bounded]
+        ServerToClient[Server→Client Queue<br/>STM TQueue<br/>Unbounded]
         BackPressure{Backpressure<br/>Check}
+        BusyResponse[Server Busy<br/>Response]
     end
 
     subgraph Agents["LSP Agents"]
@@ -34,63 +33,72 @@ Extremely WIP. Don't expect anything to work correctly yet.
     end
 
     Client -->|LSP Request| BackPressure
-    BackPressure -->|Under Limit| PubChan
-    BackPressure -->|Over Limit| Client
-    PubChan -->|Broadcast| Agent1
-    PubChan -->|Broadcast| Agent2
-    PubChan -->|Broadcast| Agent3
+    BackPressure -->|Queue Full| BusyResponse
+    BusyResponse -->|Error Response| Client
+    BackPressure -->|Queue Available| ClientToServer
+    
+    ClientToServer -->|Fan-out| Agent1
+    ClientToServer -->|Fan-out| Agent2
+    ClientToServer -->|Fan-out| Agent3
 
-    Agent1 -->|Response| ResponseMap
-    Agent2 -->|Response| ResponseMap
-    Agent3 -->|Response| ResponseMap
+    Agent1 -->|Response| ServerToClient
+    Agent2 -->|Response| ServerToClient
+    Agent3 -->|Response| ServerToClient
 
-    ResponseMap -->|All Responses<br/>Collected & Merged| SubChan
-    SubChan -->|Merged Response| Client
-
-    ReqTracker -.->|Track Request ID<br/>& Agent Count| ResponseMap
+    ServerToClient -->|Fan-in| Client
 #+end_src
 
-Lspipe uses Haskell STM TChannels where it has a publish and a subscribe channel for the client.
-Lspipe refers to each LSP server as an Agent (because buzzword). The publish and subscribe channels are copied for each agent.
-This means that every lsp request from the client is broadcast to all agents and every response is returned to the client.
-Lspipe uses bounded channels for automatic backpressure.
+Lspipe uses Haskell STM queues with different characteristics for each direction:
+- *Client→Server*: Bounded `TBQueue` (capacity: 128) for backpressure control
+- *Server→Client*: Unbounded `TQueue` for responsive server communication
+
+Each LSP server runs as an independent Agent. The client-to-server queue fans out to all agents via multiple handles, while server responses fan in through a shared unbounded queue.
 
 #+begin_src mermaid
 sequenceDiagram
     participant C as LSP Client
     participant L as LSPIPE
+    participant Q1 as Client→Server Queue
     participant A1 as Agent 1
     participant A2 as Agent 2
-    participant A3 as Agent N
-
-    Note over L: Check backpressure limit
+    participant Q2 as Server→Client Queue
 
     C->>L: LSP Request (ID: 123)
-
-    alt Under backpressure limit
-        Note over L: Store ID=123, Agent Count=3
-        L->>A1: Broadcast Request (ID: 123)
-        L->>A2: Broadcast Request (ID: 123)
-        L->>A3: Broadcast Request (ID: 123)
-
-        A1->>L: Response (ID: 123)
-        A2->>L: Response (ID: 123)
-        A3->>L: Response (ID: 123)
-
-        Note over L: All responses collected<br/>Merge responses
-        L->>C: Merged Response (ID: 123)
-    else Over backpressure limit
-        L->>C: Server Busy Error
+    
+    alt Queue has capacity
+        L->>Q1: Check capacity & enqueue
+        Note over Q1: TBQueue (bounded)
+        Q1->>A1: Forward request
+        Q1->>A2: Forward request
+        
+        A1->>Q2: Response (ID: 123)
+        A2->>Q2: Response (ID: 123)
+        Note over Q2: TQueue (unbounded)
+        
+        Q2->>L: Read responses
+        L->>C: Forward responses
+        
+    else Queue is full (backpressure)
+        alt Request has ID
+            L->>C: Server Busy Error (ID: 123)
+        else Request has no ID (notification)
+            Note over L: Block until queue available
+            L->>Q1: Enqueue when space available
+        end
     end
 #+end_src
 
-When a request with an ID is sent from the client the ID of the request, and the number of agents the request is broadcast to is kept track of.
-Responses to the client are put in a Map like structure and once every response from the agents are returned they are merged.
-The merging is done in a best effort way. Once merged they are returned to the client.
+The backpressure mechanism works as follows:
+- When the client-to-server queue is full, LSPIPE checks if the request has an ID
+- *Requests with ID*: Immediately respond with "Server Busy" error to maintain client responsiveness  
+- *Notifications (no ID)*: Block until queue space becomes available, since they don't expect responses
+- Server-to-client communication uses unbounded queues to prevent response blocking
 
-If a request from the client is sent when the backpressure limit has been reached lspipe responds with a server-busy error to the client.
-This is done because not all Agents have good backpressure support and can lag when hit with too many requests for a client.
-If one agent slows down this is very detrimental for lspipe as it can only respond as fast as the slowest client.
+This design ensures that:
+1. Slow agents cannot overwhelm the system due to bounded client queues
+2. The client receives immediate feedback when the system is under load
+3. Server responses are never blocked, maintaining system responsiveness
+4. Non-critical notifications don't cause client timeouts
 
 * Build/Develop
 ** Nix develop
