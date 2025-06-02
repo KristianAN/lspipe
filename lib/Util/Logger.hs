@@ -10,6 +10,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Effectful
+import Effectful.Console.ByteString qualified as C
 import Effectful.Dispatch.Dynamic
 import Effectful.FileSystem
 import Effectful.FileSystem.IO
@@ -33,20 +34,20 @@ logDebug message = send $ LogDebug message
 
 type instance DispatchOf Logger = Dynamic
 
-logMessage :: (IOE :> es) => T.Text -> T.Text -> Eff es ()
+logMessage :: (C.Console :> es, IOE :> es) => T.Text -> T.Text -> Eff es ()
 logMessage level message = do
-    timeStamp <- liftIO currentTime
-    liftIO $ putStrLn $ T.unpack $ createLogText timeStamp level message
+    timeStamp <- currentTime
+    C.putStrLn $ encodeUtf8 $ createLogText timeStamp level message
 
 createLogText :: T.Text -> T.Text -> T.Text -> T.Text
 createLogText timestamp level message = "<" <> timestamp <> "> " <> level <> message
 
-currentTime :: IO T.Text
+currentTime :: (IOE :> es) => Eff es T.Text
 currentTime = do
-    now <- getCurrentTime :: IO UTCTime
+    now <- liftIO (getCurrentTime :: IO UTCTime)
     pure $ T.pack $ formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" now
 
-runConsoleLogger :: (IOE :> es) => Eff (Logger : es) a -> Eff es a
+runConsoleLogger :: (C.Console :> es, IOE :> es) => Eff (Logger : es) a -> Eff es a
 runConsoleLogger = interpret $ \_ -> \case
     LogInfo message -> logMessage "INFO: " message
     LogError message -> logMessage "ERROR: " message
@@ -69,5 +70,5 @@ runFileSystemLogger level l = do
 
 writeLogMessage :: (IOE :> es, FileSystem :> es) => T.Text -> T.Text -> Eff es ()
 writeLogMessage level message = do
-    ts <- liftIO currentTime
+    ts <- currentTime
     withFile "/tmp/lspipe/lspipe.log" WriteMode $ \handle -> hPutStrLn handle (encodeUtf8 (createLogText ts level message))
