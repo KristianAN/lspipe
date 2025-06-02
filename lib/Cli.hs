@@ -15,10 +15,11 @@ import Util.Logger
 
 data Lspipe = Lspipe
     { servers :: [Command]
+    , debug :: Bool
     }
 
 lspipe :: OA.Parser Lspipe
-lspipe = Lspipe <$> OA.many (fmap toCommand (OA.strOption (OA.long "server" <> OA.metavar "SERVER" <> OA.help "Servers to launch")))
+lspipe = Lspipe <$> OA.many (fmap toCommand (OA.strOption (OA.long "server" <> OA.metavar "SERVER" <> OA.help "Servers to launch"))) <*> OA.switch (OA.long "debug" <> OA.help "Turn on debug logging")
 
 toCommand :: String -> Command
 toCommand input =
@@ -31,7 +32,8 @@ toCommand input =
 runLspipe :: IO ()
 runLspipe = do
     options <- OA.execParser $ OA.info (lspipe OA.<**> OA.helper) OA.fullDesc
-    result <- runEff $ runErrorNoCallStack @LspError $ runFileSystem $ (runFileSystemLogger Debug) $ runProcess $ runConcurrent $ do
+    let logMode = if debug options then Debug else Info
+    result <- runEff $ runErrorNoCallStack @LspError $ runFileSystem $ (runFileSystemLogger logMode) $ runProcess $ runConcurrent $ do
         exitCode <- runApp stdin stdout (servers options)
         liftIO $ exitWith exitCode
     case result of
