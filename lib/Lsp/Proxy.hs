@@ -11,7 +11,7 @@ import Data.Foldable (traverse_)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Effectful
-import Effectful.Concurrent.Async (async)
+import Effectful.Concurrent.Async (async, wait)
 import Effectful.Concurrent.STM
 import Effectful.Error.Static
 import Effectful.FileSystem (FileSystem)
@@ -51,11 +51,12 @@ processChannelToWriter queue handleID handles = do
             handles
         write
 
-decodeLspRequest :: (Error LspError :> es) => T.Text -> Eff es LspReq.LspRequest
+-- TODO do something more performant here
+decodeLspRequest :: (Error LspError :> es) => T.Text -> Eff es (Maybe LspReq.LspRequest)
 decodeLspRequest req =
     case Aeson.decode (BL.fromStrict (TE.encodeUtf8 req)) of
-        Just v -> pure v
-        Nothing -> throwError $ LspError (T.pack "Unable to decode request as json")
+        Just v -> pure (Just v)
+        Nothing -> pure Nothing -- Could be a response, not a request
 
 proccessClientReader ::
     (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) =>
@@ -77,22 +78,30 @@ proccessClientReader reader serverTBQueue clientTQueue = do
                 logInfo "Client reached EOF, detaching and shutting down"
                 pure () -- End of stream
             else do
-                lspRequest <- decodeLspRequest message
-                wroteSuccessfully <- atomically $ do
-                    full <- isFullTBQueue serverTBQueue
-                    if full
-                        then pure False
-                        else do
-                            writeTBQueue serverTBQueue message
-                            pure True
-                if wroteSuccessfully
-                    then logInfo "wrote message from client to queue" >> processLoop
-                    else do handleFullQueue lspRequest message
+                maybeLspRequest <- decodeLspRequest message
+                case maybeLspRequest of
+                    Just lspRequest -> do
+                        -- It's a request from the client
+                        wroteSuccessfully <- atomically $ do
+                            full <- isFullTBQueue serverTBQueue
+                            if full
+                                then pure False
+                                else do
+                                    writeTBQueue serverTBQueue message
+                                    pure True
+                        if wroteSuccessfully
+                            then logDebug "wrote message from client to queue" >> processLoop
+                            else handleFullQueue lspRequest message
+                    Nothing -> do
+                        -- It's likely a response from the client, forward it directly
+                        logDebug "message is not a request (likely a response), forwarding to server"
+                        atomically $ writeTBQueue serverTBQueue message
+                        processLoop
 
     handleFullQueue request message =
         case LspReq.id request of
             Nothing -> do
-                logDebug "message had no ID, putting pack into queue"
+                logDebug "message had no ID, putting back into queue"
                 atomically $ writeTBQueue serverTBQueue message
                 processLoop
             Just reqId -> do
@@ -113,7 +122,7 @@ processServerReader agents queue = do
     logDebug "Setting up server reader"
     traverse_ (\agent -> hSetBuffering (Agent.stdout agent) (BlockBuffering Nothing)) agents
     logDebug "Setting up server reader processLoop"
-    traverse_ (\agent -> process (Agent.stdout agent) (Agent.agentId agent)) agents
+    traverse_ (\agent -> async (process (Agent.stdout agent) (Agent.agentId agent))) agents
   where
     process reader agentId = do
         message <- rpcRead reader
@@ -133,9 +142,17 @@ runApp clientReader clientWriter commands = do
     let desiredCapacity = 128 :: Int
     clientToServerChan <- atomically $ newTBQueue (fromIntegral desiredCapacity)
     serverToClientChan <- atomically newTQueue
-    let asyncTasks = [processChannelToWriter (BoundedQueue clientToServerChan) "LSP AGENTS" (fmap Agent.stdin agents), processChannelToWriter (UnboundedQueue serverToClientChan) "LSP CLIENT" [clientWriter], processServerReader agents serverToClientChan, proccessClientReader clientReader clientToServerChan serverToClientChan]
-    logDebug "starting all async tasks"
-    traverse_ async asyncTasks
+    asyncHandles <-
+        traverse
+            async
+            [ processChannelToWriter (BoundedQueue clientToServerChan) "LSP AGENTS" (fmap Agent.stdin agents)
+            , processChannelToWriter (UnboundedQueue serverToClientChan) "LSP CLIENT" [clientWriter]
+            , processServerReader agents serverToClientChan
+            , proccessClientReader clientReader clientToServerChan serverToClientChan
+            ]
+
+    logDebug "waiting for async tasks to complete"
+    traverse_ wait asyncHandles
     logDebug "waiting for agents to exit"
     traverse (waitForProcess . Agent.procHandle) agents >> pure ExitSuccess -- TODO find some way to handle the exit code properly
 

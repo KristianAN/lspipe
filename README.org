@@ -11,7 +11,7 @@ Lspipe aims to bring multi-lsp support for clients that only support one lsp per
 - 🛡️ *Fault Tolerance*: Graceful handling of slow or unresponsive agents
 
 * Status
-Extremely WIP. Don't expect anything to work correctly yet.
+Extremely WIP. Don't expect anything to work correctly yet. Currently capable of being a proxy for one lsp.
 
 * Architecture
 
