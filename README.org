@@ -10,6 +10,9 @@ Lspipe aims to bring multi-lsp support for clients that only support one lsp per
 - 🏗️ *Concurrent Architecture*: Built with Haskell STM for high-performance concurrency
 - 🛡️ *Fault Tolerance*: Graceful handling of slow or unresponsive agents
 
+* Status
+Extremely WIP. Don't expect anything to work correctly yet.
+
 * Architecture
 
 #+begin_src mermaid
