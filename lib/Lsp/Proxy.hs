@@ -1,17 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-{-# HLINT ignore "Use traverse_" #-}
-
 module Lsp.Proxy (runApp, Command (..)) where
 
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (traverse_)
+import Data.Functor ((<&>))
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Effectful
-import Effectful.Concurrent.Async (async, wait)
+import Effectful.Concurrent.Async (async, wait, waitCatch, withAsync)
 import Effectful.Concurrent.STM
 import Effectful.Error.Static
 import Effectful.FileSystem (FileSystem)
@@ -22,7 +21,7 @@ import Lsp.LspRequest qualified as LspReq
 import Lsp.LspResponse (LspResponseError (..))
 import Lsp.LspResponse qualified as LspR
 import Lsp.Rpc
-import System.Exit (ExitCode (ExitSuccess))
+import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.IO (BufferMode (BlockBuffering), Handle)
 import Util.Logger
 
@@ -58,13 +57,13 @@ decodeLspRequest req =
         Just v -> pure (Just v)
         Nothing -> pure Nothing -- Could be a response, not a request
 
-proccessClientReader ::
+processClientReader ::
     (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) =>
     Handle -> -- Client's input
     TBQueue T.Text -> -- Queue for messages TO the LSP server
     TQueue T.Text -> -- Queue for messages TO the client (for "Server Busy" response)
     Eff es ()
-proccessClientReader reader serverTBQueue clientTQueue = do
+processClientReader reader serverTBQueue clientTQueue = do
     logDebug "Setting up client reader handle"
     hSetBuffering reader (BlockBuffering Nothing)
     logDebug "Starting process loop for client"
@@ -93,6 +92,7 @@ proccessClientReader reader serverTBQueue clientTQueue = do
                             then logDebug "wrote message from client to queue" >> processLoop
                             else handleFullQueue lspRequest message
                     Nothing -> do
+                        -- TODO: This will not work properly with multiple agents (who gets the message?)
                         -- It's likely a response from the client, forward it directly
                         logDebug "message is not a request (likely a response), forwarding to server"
                         atomically $ writeTBQueue serverTBQueue message
@@ -142,19 +142,20 @@ runApp clientReader clientWriter commands = do
     let desiredCapacity = 128 :: Int
     clientToServerChan <- atomically $ newTBQueue (fromIntegral desiredCapacity)
     serverToClientChan <- atomically newTQueue
-    asyncHandles <-
-        traverse
-            async
-            [ processChannelToWriter (BoundedQueue clientToServerChan) "LSP AGENTS" (fmap Agent.stdin agents)
-            , processChannelToWriter (UnboundedQueue serverToClientChan) "LSP CLIENT" [clientWriter]
-            , processServerReader agents serverToClientChan
-            , proccessClientReader clientReader clientToServerChan serverToClientChan
-            ]
-
-    logDebug "waiting for async tasks to complete"
-    traverse_ wait asyncHandles
-    logDebug "waiting for agents to exit"
-    traverse (waitForProcess . Agent.procHandle) agents >> pure ExitSuccess -- TODO find some way to handle the exit code properly
+    withAsync (processChannelToWriter (BoundedQueue clientToServerChan) "LSP AGENTS" (fmap Agent.stdin agents)) $ \a1 ->
+        withAsync (processServerReader agents serverToClientChan) $ \a2 ->
+            withAsync (processChannelToWriter (UnboundedQueue serverToClientChan) "LSP CLIENT" [clientWriter]) $ \a3 ->
+                withAsync (processClientReader clientReader clientToServerChan serverToClientChan) $ \a4 -> do
+                    logDebug "waiting for async tasks to complete"
+                    result <- (traverse waitCatch [a1, a2, a3, a4]) <&> sequence
+                    logDebug "waiting for agents to exit"
+                    agentsAsync <- traverse (async . waitForProcess . Agent.procHandle) agents
+                    traverse_ waitCatch agentsAsync
+                    case result of
+                        Left e -> do
+                            logError ("Error in communication channels: " <> T.pack (show e))
+                            pure (ExitFailure 1)
+                        Right _ -> pure ExitSuccess
 
 setupAgent :: (Error LspError :> es, Process :> es) => Command -> Eff es Agent.LspAgent
 setupAgent serverCommand = do

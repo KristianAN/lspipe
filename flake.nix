@@ -41,6 +41,11 @@
           devShell = {
             # Enabled by default
             # enable = true;
+            
+            mkShellArgs = rec {
+              buildInputs = with pkgs; [typos-lsp];
+              # LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
+            };
 
             # Programs you want to make available in the shell.
             # Default programs can be disabled by setting to 'null'

@@ -1,3 +1,7 @@
 * TODO Deduplication of requests from lsp servers
 
 * TODO LSP multiplexing
+
+* TODO Broker abstraction
+
+It's very rough and manual with TQueue and TBQueue in the proxy right now, making it rather hard to reason about. I'd like to put this behind a broker abstraction
