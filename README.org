@@ -127,3 +127,8 @@ or
 #+begin_src shell
 nix run .#lspipe
 #+end_src
+
+* Acknowledgements
+lspipe is heavily inspired by
+  - [[https://github.com/blahgeek/emacs-lsp-booster][emacs-lsp-booster]]
+  - [[https://github.com/thefrontside/lspx][lspx]]
