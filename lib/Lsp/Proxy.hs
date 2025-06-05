@@ -28,7 +28,15 @@ import Util.Logger
 data Command = Command {command :: String, args :: [String]}
 
 -- TODO Inject logic for which queue we write to based on the server capabilities
-processChannelToWriterClient :: (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) => TQueue T.Text -> Handle -> Eff es ()
+processChannelToWriterClient ::
+    ( Logger :> es
+    , Error LspError :> es
+    , Concurrent :> es
+    , FileSystem :> es
+    ) =>
+    TQueue T.Text ->
+    Handle ->
+    Eff es ()
 processChannelToWriterClient queue handle = do
     logDebug $ "starting processChannelToWriter with for client: "
     hSetBuffering handle (BlockBuffering Nothing)
@@ -40,14 +48,21 @@ processChannelToWriterClient queue handle = do
         rpcWrite handle msg
         write
 
-processChannelToWriterAgents :: (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) => TBQueue T.Text -> TVar [Agent.LspAgent] -> Eff es ()
+processChannelToWriterAgents ::
+    ( Logger :> es
+    , Error LspError :> es
+    , Concurrent :> es
+    , FileSystem :> es
+    ) =>
+    TBQueue T.Text ->
+    TVar [Agent.LspAgent] ->
+    Eff es ()
 processChannelToWriterAgents queue agents = do
     agents' <- atomically $ readTVar agents
     traverse_ (\a -> logDebug $ "starting processChannelToWriter with handle id: " <> (Agent.agentId a)) agents'
     traverse_ (\a -> hSetBuffering (Agent.stdin a) (BlockBuffering Nothing)) agents'
     write agents'
   where
-
     write agents' = do
         msg <- atomically $ readTBQueue queue
         logDebug $ "processChannelToWriterAgents got message from queue. will write with rpcWriter. message: " <> msg
@@ -59,14 +74,21 @@ processChannelToWriterAgents queue agents = do
         write agents'
 
 -- TODO do something more performant here
-decodeLspRequest :: (Error LspError :> es) => T.Text -> Eff es (Maybe LspReq.LspRequest)
+decodeLspRequest ::
+    (Error LspError :> es) =>
+    T.Text ->
+    Eff es (Maybe LspReq.LspRequest)
 decodeLspRequest req =
     case Aeson.decode (BL.fromStrict (TE.encodeUtf8 req)) of
         Just v -> pure (Just v)
         Nothing -> pure Nothing -- Could be a response, not a request
 
 processClientReader ::
-    (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) =>
+    ( Logger :> es
+    , Error LspError :> es
+    , Concurrent :> es
+    , FileSystem :> es
+    ) =>
     Handle -> -- Client's input
     TBQueue T.Text -> -- Queue for messages TO the LSP server
     TQueue T.Text -> -- Queue for messages TO the client (for "Server Busy" response)
@@ -125,7 +147,15 @@ processClientReader reader serverTBQueue clientTQueue = do
                 processLoop
 
 -- TODO here we need to merge the responses before we send them to the client
-processServerReader :: (Logger :> es, Error LspError :> es, FileSystem :> es, Concurrent :> es) => TVar [Agent.LspAgent] -> TQueue T.Text -> Eff es ()
+processServerReader ::
+    ( Logger :> es
+    , Error LspError :> es
+    , FileSystem :> es
+    , Concurrent :> es
+    ) =>
+    TVar [Agent.LspAgent] ->
+    TQueue T.Text ->
+    Eff es ()
 processServerReader agents queue = do
     logDebug "Setting up server reader"
     agents' <- atomically $ readTVar agents
@@ -144,7 +174,17 @@ processServerReader agents queue = do
                 atomically $ writeTQueue queue message
                 process reader agentId
 
-runApp :: (Logger :> es, FileSystem :> es, Process :> es, Concurrent :> es, Error LspError :> es) => Handle -> Handle -> [Command] -> Eff es ExitCode
+runApp ::
+    ( Logger :> es
+    , FileSystem :> es
+    , Process :> es
+    , Concurrent :> es
+    , Error LspError :> es
+    ) =>
+    Handle ->
+    Handle ->
+    [Command] ->
+    Eff es ExitCode
 runApp clientReader clientWriter commands = do
     logInfo "starting lspipe"
     agents <- (traverse setupAgent commands) >>= newTVarIO
@@ -158,8 +198,9 @@ runApp clientReader clientWriter commands = do
                     logDebug "waiting for async tasks to complete"
                     result <- (traverse waitCatch [a1, a2, a3, a4]) <&> sequence
                     logDebug "waiting for agents to exit"
-                    agentsProcHandles <- atomically (readTVar agents) >>= \agents' ->
-                        traverse (async . waitForProcess . Agent.procHandle) agents'
+                    agentsProcHandles <-
+                        atomically (readTVar agents) >>= \agents' ->
+                            traverse (async . waitForProcess . Agent.procHandle) agents'
                     traverse_ waitCatch agentsProcHandles
                     case result of
                         Left e -> do
