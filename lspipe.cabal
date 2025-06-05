@@ -20,13 +20,14 @@ library
     , containers
     , effectful
     , aeson
+    , aeson-extra
     , optparse-applicative
     , time
   exposed-modules:
     Cli
+    Lsp.LspResponse
   other-modules:
     Lsp.LspRequest
-    Lsp.LspResponse
     Lsp.Rpc
     Lsp.Proxy
     Lsp.Agent
@@ -48,9 +49,12 @@ test-suite lspipe-tests
   hs-source-dirs: test
   build-tool-depends: hspec-discover:hspec-discover == 2.*
   other-modules:
+     Lsp.LspResponseSpec
   build-depends:
       base
     , text
+    , aeson
+    , bytestring
     , hspec 
     , hspec-contrib
     , lspipe

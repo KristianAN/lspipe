@@ -1,6 +1,10 @@
-module Lsp.LspResponse (LspResponse (..), LspResponseError (..)) where
+{-# LANGUAGE OverloadedStrings #-}
+
+module Lsp.LspResponse (extractCapabilities, LspResponse (..), LspResponseError (..)) where
 
 import Data.Aeson
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
 import Data.Text qualified as T
 import GHC.Generics (Generic)
 
@@ -15,7 +19,7 @@ instance FromJSON LspResponseError
 
 data LspResponse = LspResponse
     { jsonrpc :: T.Text
-    , id :: Int
+    , id :: Maybe Int
     , result :: Value
     , error :: Maybe LspResponseError
     }
@@ -23,3 +27,14 @@ data LspResponse = LspResponse
 
 instance ToJSON LspResponse
 instance FromJSON LspResponse
+
+extractKeyMap :: Value -> KM.KeyMap Value
+extractKeyMap (Object km) = km
+extractKeyMap _ = KM.empty
+
+extractCapabilities :: LspResponse -> Maybe [T.Text]
+extractCapabilities resp = do
+    Object capabilities <- KM.lookup "capabilities" (extractKeyMap res)
+    pure $ map (Key.toText) $ KM.keys capabilities
+  where
+    res = result resp

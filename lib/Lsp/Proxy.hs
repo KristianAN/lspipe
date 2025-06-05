@@ -4,11 +4,14 @@
 module Lsp.Proxy (runApp, Command (..)) where
 
 import Data.Aeson qualified as Aeson
+import Data.Aeson.Extra.Merge (lodashMerge)
 import Data.ByteString.Lazy qualified as BL
-import Data.Foldable (traverse_)
+import Data.Foldable (foldl', traverse_)
 import Data.Functor ((<&>))
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Encoding qualified as TLE
 import Effectful
 import Effectful.Concurrent.Async (async, waitCatch, withAsync)
 import Effectful.Concurrent.STM
@@ -83,6 +86,15 @@ decodeLspRequest req =
         Just v -> pure (Just v)
         Nothing -> pure Nothing -- Could be a response, not a request
 
+decodeLspResponse ::
+    (Error LspError :> es) =>
+    T.Text ->
+    Eff es LspR.LspResponse
+decodeLspResponse req =
+    case Aeson.decode (BL.fromStrict (TE.encodeUtf8 req)) of
+        Just v -> pure v
+        Nothing -> throwError $ LspError "Unable to decode into LSP Response"
+
 processClientReader ::
     ( Logger :> es
     , Error LspError :> es
@@ -101,7 +113,6 @@ processClientReader reader serverTBQueue clientTQueue = do
   where
     processLoop = do
         message <- rpcRead reader
-        logDebug $ "got message from client: " <> message
         if T.null message
             then do
                 logInfo "Client reached EOF, detaching and shutting down"
@@ -138,7 +149,7 @@ processClientReader reader serverTBQueue clientTQueue = do
                 let lspResponse =
                         LspR.LspResponse
                             { LspR.jsonrpc = LspReq.jsonrpc request
-                            , LspR.id = reqId
+                            , LspR.id = Just reqId
                             , LspR.result = Aeson.Null
                             , LspR.error = Just (LspResponseError{code = -32803, message = T.pack "[lspipe] : Server is busy"})
                             }
@@ -159,10 +170,34 @@ processServerReader ::
 processServerReader agents queue = do
     logDebug "Setting up server reader"
     agents' <- atomically $ readTVar agents
-    traverse_ (\agent -> hSetBuffering (Agent.stdout agent) (BlockBuffering Nothing)) agents'
+    logDebug "Fetching capabilities"
+    (agentsWithCapabilities, initMsgs) <-
+        ( traverse
+                ( \agent -> do
+                    hSetBuffering (Agent.stdout agent) (BlockBuffering Nothing)
+                    initMsg <- rpcRead (Agent.stdout agent)
+                    logDebug $ "init message from server is :" <> initMsg
+                    response <- decodeLspResponse initMsg
+                    messageJson <- case Aeson.decode (BL.fromStrict (TE.encodeUtf8 initMsg)) of
+                        Just v -> pure v
+                        Nothing -> throwError $ LspError "Unable to create Value from message"
+                    capabilities <- case LspR.extractCapabilities response of
+                        Just v -> pure v
+                        Nothing -> throwError $ LspError "Unable to get server capabilities"
+                    pure $ ((agent{Agent.capabilities = capabilities}, (messageJson)))
+                )
+                agents'
+            )
+            <&> unzip
+
+    let merged = foldl' (\acc e -> lodashMerge acc e) (Aeson.Object mempty) initMsgs
+    atomically $ writeTQueue queue $ valueToText merged
+    atomically $ writeTVar agents agentsWithCapabilities
     logDebug "Setting up server reader processLoop"
-    traverse_ (\agent -> async (process (Agent.stdout agent) (Agent.agentId agent))) agents'
+    traverse_ (\agent -> async (process (Agent.stdout agent) (Agent.agentId agent))) agentsWithCapabilities
   where
+    valueToText :: Aeson.Value -> T.Text
+    valueToText = TL.toStrict . TLE.decodeUtf8 . Aeson.encode
     process reader agentId = do
         message <- rpcRead reader
         if T.null message
