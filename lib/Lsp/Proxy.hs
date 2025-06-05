@@ -10,7 +10,7 @@ import Data.Functor ((<&>))
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Effectful
-import Effectful.Concurrent.Async (async, wait, waitCatch, withAsync)
+import Effectful.Concurrent.Async (async, waitCatch, withAsync)
 import Effectful.Concurrent.STM
 import Effectful.Error.Static
 import Effectful.FileSystem (FileSystem)
@@ -27,28 +27,36 @@ import Util.Logger
 
 data Command = Command {command :: String, args :: [String]}
 
-data MessageQueue a = BoundedQueue (TBQueue a) | UnboundedQueue (TQueue a)
-
 -- TODO Inject logic for which queue we write to based on the server capabilities
-processChannelToWriter :: (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) => MessageQueue T.Text -> T.Text -> [Handle] -> Eff es ()
-processChannelToWriter queue handleID handles = do
-    logDebug $ "starting processChannelToWriter with handle id: " <> handleID
-    traverse_ (\handle -> hSetBuffering handle (BlockBuffering Nothing)) handles
+processChannelToWriterClient :: (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) => TQueue T.Text -> Handle -> Eff es ()
+processChannelToWriterClient queue handle = do
+    logDebug $ "starting processChannelToWriter with for client: "
+    hSetBuffering handle (BlockBuffering Nothing)
     write
   where
-    readFromWrappedQueue :: MessageQueue T.Text -> STM T.Text
-    readFromWrappedQueue aq = case aq of
-        UnboundedQueue tq -> readTQueue tq
-        BoundedQueue tbq -> readTBQueue tbq
     write = do
-        msg <- atomically $ readFromWrappedQueue queue
-        logDebug $ "processChannelToWriter - " <> handleID <> ". got message from queue. will write with rpcWriter. message: " <> msg
+        msg <- atomically $ readTQueue queue
+        logDebug $ "processChannelToWriterClient . got message from queue. will write with rpcWriter. message: " <> msg
+        rpcWrite handle msg
+        write
+
+processChannelToWriterAgents :: (Logger :> es, Error LspError :> es, Concurrent :> es, FileSystem :> es) => TBQueue T.Text -> TVar [Agent.LspAgent] -> Eff es ()
+processChannelToWriterAgents queue agents = do
+    agents' <- atomically $ readTVar agents
+    traverse_ (\a -> logDebug $ "starting processChannelToWriter with handle id: " <> (Agent.agentId a)) agents'
+    traverse_ (\a -> hSetBuffering (Agent.stdin a) (BlockBuffering Nothing)) agents'
+    write agents'
+  where
+
+    write agents' = do
+        msg <- atomically $ readTBQueue queue
+        logDebug $ "processChannelToWriterAgents got message from queue. will write with rpcWriter. message: " <> msg
         traverse_
             ( \writer -> do
-                rpcWrite writer msg
+                rpcWrite (Agent.stdin writer) msg
             )
-            handles
-        write
+            agents'
+        write agents'
 
 -- TODO do something more performant here
 decodeLspRequest :: (Error LspError :> es) => T.Text -> Eff es (Maybe LspReq.LspRequest)
@@ -117,12 +125,13 @@ processClientReader reader serverTBQueue clientTQueue = do
                 processLoop
 
 -- TODO here we need to merge the responses before we send them to the client
-processServerReader :: (Logger :> es, Error LspError :> es, FileSystem :> es, Concurrent :> es) => [Agent.LspAgent] -> TQueue T.Text -> Eff es ()
+processServerReader :: (Logger :> es, Error LspError :> es, FileSystem :> es, Concurrent :> es) => TVar [Agent.LspAgent] -> TQueue T.Text -> Eff es ()
 processServerReader agents queue = do
     logDebug "Setting up server reader"
-    traverse_ (\agent -> hSetBuffering (Agent.stdout agent) (BlockBuffering Nothing)) agents
+    agents' <- atomically $ readTVar agents
+    traverse_ (\agent -> hSetBuffering (Agent.stdout agent) (BlockBuffering Nothing)) agents'
     logDebug "Setting up server reader processLoop"
-    traverse_ (\agent -> async (process (Agent.stdout agent) (Agent.agentId agent))) agents
+    traverse_ (\agent -> async (process (Agent.stdout agent) (Agent.agentId agent))) agents'
   where
     process reader agentId = do
         message <- rpcRead reader
@@ -138,19 +147,20 @@ processServerReader agents queue = do
 runApp :: (Logger :> es, FileSystem :> es, Process :> es, Concurrent :> es, Error LspError :> es) => Handle -> Handle -> [Command] -> Eff es ExitCode
 runApp clientReader clientWriter commands = do
     logInfo "starting lspipe"
-    agents <- traverse setupAgent commands
+    agents <- (traverse setupAgent commands) >>= newTVarIO
     let desiredCapacity = 128 :: Int
     clientToServerChan <- atomically $ newTBQueue (fromIntegral desiredCapacity)
     serverToClientChan <- atomically newTQueue
-    withAsync (processChannelToWriter (BoundedQueue clientToServerChan) "LSP AGENTS" (fmap Agent.stdin agents)) $ \a1 ->
+    withAsync (processChannelToWriterAgents clientToServerChan agents) $ \a1 ->
         withAsync (processServerReader agents serverToClientChan) $ \a2 ->
-            withAsync (processChannelToWriter (UnboundedQueue serverToClientChan) "LSP CLIENT" [clientWriter]) $ \a3 ->
+            withAsync (processChannelToWriterClient serverToClientChan clientWriter) $ \a3 ->
                 withAsync (processClientReader clientReader clientToServerChan serverToClientChan) $ \a4 -> do
                     logDebug "waiting for async tasks to complete"
                     result <- (traverse waitCatch [a1, a2, a3, a4]) <&> sequence
                     logDebug "waiting for agents to exit"
-                    agentsAsync <- traverse (async . waitForProcess . Agent.procHandle) agents
-                    traverse_ waitCatch agentsAsync
+                    agentsProcHandles <- atomically (readTVar agents) >>= \agents' ->
+                        traverse (async . waitForProcess . Agent.procHandle) agents'
+                    traverse_ waitCatch agentsProcHandles
                     case result of
                         Left e -> do
                             logError ("Error in communication channels: " <> T.pack (show e))
