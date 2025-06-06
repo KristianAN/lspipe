@@ -4,14 +4,12 @@
 module Lsp.Proxy (runApp, Command (..)) where
 
 import Data.Aeson qualified as Aeson
-import Data.Aeson.Extra.Merge (lodashMerge)
+
 import Data.ByteString.Lazy qualified as BL
-import Data.Foldable (foldl', traverse_)
+import Data.Foldable (traverse_)
 import Data.Functor ((<&>))
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Text.Lazy qualified as TL
-import Data.Text.Lazy.Encoding qualified as TLE
 import Effectful
 import Effectful.Concurrent.Async (async, waitCatch, withAsync)
 import Effectful.Concurrent.STM
@@ -23,6 +21,7 @@ import Lsp.Agent qualified as Agent
 import Lsp.LspRequest qualified as LspReq
 import Lsp.LspResponse (LspResponseError (..))
 import Lsp.LspResponse qualified as LspR
+import Lsp.Merger (mergeLspInitMessages)
 import Lsp.Rpc
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.IO (BufferMode (BlockBuffering), Handle)
@@ -190,15 +189,14 @@ processServerReader agents queue = do
             )
             <&> unzip
 
-    let merged = foldl' (\acc e -> lodashMerge acc e) (Aeson.Object mempty) initMsgs
-    logDebug $ "merged capabilities is: " <> valueToText merged
-    atomically $ writeTQueue queue $ valueToText merged
+    merged <- case mergeLspInitMessages (fmap Agent.agentId agents') initMsgs of
+        Just a -> pure a
+        Nothing -> throwError $ LspError "Unable to merge lsp init responses"
+    atomically $ writeTQueue queue merged
     atomically $ writeTVar agents agentsWithCapabilities
     logDebug "Setting up server reader processLoop"
     traverse_ (\agent -> async (process (Agent.stdout agent) (Agent.agentId agent))) agentsWithCapabilities
   where
-    valueToText :: Aeson.Value -> T.Text
-    valueToText = TL.toStrict . TLE.decodeUtf8 . Aeson.encode
     process reader agentId = do
         message <- rpcRead reader
         if T.null message
