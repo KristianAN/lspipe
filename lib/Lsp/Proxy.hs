@@ -169,7 +169,7 @@ processServerReader ::
     Eff es ()
 processServerReader agents queue = do
     logDebug "Setting up server reader"
-    agents' <- atomically $ readTVar agents
+    agents' <- readTVarIO agents
     logDebug "Fetching capabilities"
     (agentsWithCapabilities, initMsgs) <-
         ( traverse
@@ -191,6 +191,7 @@ processServerReader agents queue = do
             <&> unzip
 
     let merged = foldl' (\acc e -> lodashMerge acc e) (Aeson.Object mempty) initMsgs
+    logDebug $ "merged capabilities is: " <> valueToText merged
     atomically $ writeTQueue queue $ valueToText merged
     atomically $ writeTVar agents agentsWithCapabilities
     logDebug "Setting up server reader processLoop"
