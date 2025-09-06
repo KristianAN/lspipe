@@ -1,0 +1,231 @@
+#+TITLE: lspipe Testing Strategy
+#+AUTHOR: KristianAN
+#+DATE: 2025-09-05
+#+STARTUP: overview
+
+* Current Test Coverage
+** DONE LspResponse parsing and capability extraction
+** TODO Merger implementation (test is placeholder - ~"fun":true~)
+
+* Testing Approach for IO-Heavy Code
+
+** Unit Testing Strategy [0/4]
+*** TODO Pure Functions First
+Focus on testing pure transformations that can be extracted:
+
+#+begin_src haskell-ts
+-- Extract these pure functions from your IO code:
+module Lsp.Router where
+
+-- Pure routing logic
+selectAgentsByCapability :: T.Text -> [Agent.LspAgent] -> [Agent.LspAgent]
+selectAgentsByCapability method agents = 
+  filter (hasCapability method) agents
+
+-- Test this easily:
+spec = do
+  describe "selectAgentsByCapability" $ do
+    it "routes textDocument/completion to agents with completion capability" $ do
+      let agents = [agentWithCompletion, agentWithoutCompletion]
+      selectAgentsByCapability "textDocument/completion" agents 
+        `shouldBe` [agentWithCompletion]
+#+end_src
+
+*** TODO Mock-based Testing for Message Flow
+Create test doubles for handles and queues:
+
+#+begin_src haskell-ts
+-- Test/Lsp/MockHandles.hs
+module Test.Lsp.MockHandles where
+
+import Effectful
+import Effectful.Concurrent.STM
+import Data.Text qualified as T
+
+data MockHandle = MockHandle
+  { inputQueue :: TQueue T.Text
+  , outputQueue :: TQueue T.Text
+  }
+
+createMockHandle :: IO (MockHandle, Handle)
+createMockHandle = do
+  inQ <- newTQueueIO
+  outQ <- newTQueueIO
+  -- Create a handle that reads from inQ and writes to outQ
+  -- This lets you control what the "server" sends and verify what was sent to it
+
+-- Usage in tests:
+spec = do
+  describe "processClientReader" $ do
+    it "forwards requests to server queue" $ do
+      (mock, handle) <- createMockHandle
+      serverQueue <- newTBQueueIO 10
+      clientQueue <- newTQueueIO
+      
+      -- Put a request in the mock input
+      atomically $ writeTQueue (inputQueue mock) sampleRequest
+      
+      -- Run the reader in a controlled way
+      race_ (timeout 1000000 $ runEff $ processClientReader handle serverQueue clientQueue)
+            (do msg <- atomically $ readTBQueue serverQueue
+                msg `shouldBe` sampleRequest)
+#+end_src
+
+*** TODO Property-Based Testing for Mergers
+Use QuickCheck for merge logic:
+
+#+begin_src haskell-ts
+-- Test/Lsp/MergerProperties.hs
+import Test.QuickCheck
+
+prop_mergePreservesAllCapabilities :: [Value] -> Bool
+prop_mergePreservesAllCapabilities responses =
+  let merged = mergeLspInitMessages ids responses
+      allCaps = concatMap extractCapabilities responses
+  in all (`elem` extractedFromMerged) allCaps
+
+prop_mergeIdempotent :: [Value] -> Bool
+prop_mergeIdempotent responses =
+  mergeLspInitMessages ids responses == 
+  mergeLspInitMessages ids (maybeToList $ mergeLspInitMessages ids responses)
+#+end_src
+
+*** TODO Integration Tests with Real LSP Servers
+Create controlled scenarios:
+
+#+begin_src haskell-ts
+-- Test/Integration/LspProxySpec.hs
+module Test.Integration.LspProxySpec where
+
+import System.Process
+import System.Timeout
+
+spec :: Spec
+spec = do
+  describe "Integration with mock LSP server" $ do
+    it "handles initialization sequence" $ do
+      withMockLspServer $ \serverCmd -> do
+        -- Start your proxy with the mock server
+        result <- timeout 5000000 $ do
+          runProxy [serverCmd] $ \clientIn clientOut -> do
+            -- Send initialize request
+            sendLspMessage clientIn initializeRequest
+            -- Read response
+            response <- readLspMessage clientOut
+            -- Verify merged capabilities
+            response `shouldSatisfy` hasExpectedCapabilities
+        
+        result `shouldBe` Just Success
+
+-- Mock LSP server that responds predictably
+withMockLspServer :: (Command -> IO a) -> IO a
+withMockLspServer action = do
+  -- Start a simple process that speaks LSP
+  let mockServer = proc "test/mock-lsp-server" []
+  bracket (startServer mockServer) stopServer action
+#+end_src
+
+** Test Organization
+
+*** Level 1: Pure Functions [0/5]
+**** TODO Request/Response correlation logic
+**** TODO Capability matching
+**** TODO Message type detection
+**** TODO ID generation/tracking
+**** TODO Merge algorithms
+
+*** Level 2: Effectful but Mockable [0/4]
+**** TODO Queue operations with mock queues
+**** TODO Handle reading/writing with mock handles
+**** TODO Timeout behavior
+**** TODO Error propagation
+
+*** Level 3: Integration Tests [0/3]
+**** TODO Single server proxy (pass-through mode)
+**** TODO Multi-server initialization
+**** TODO Request routing and response merging
+
+** Practical Test Fixtures
+
+*** Create Sample Messages
+#+begin_src haskell-ts
+-- Test/Fixtures/LspMessages.hs
+module Test.Fixtures.LspMessages where
+
+initializeRequest :: T.Text
+initializeRequest = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{...}}"
+
+completionRequest :: T.Text
+completionRequest = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/completion\",\"params\":{...}}"
+
+hoverResponse :: T.Text
+hoverResponse = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"...\"}}}"
+#+end_src
+
+*** Mock LSP Server Script
+#+begin_src python
+#!/usr/bin/env python3
+# test/mock-lsp-server.py
+import sys
+import json
+
+def read_header():
+    # Read Content-Length header
+    ...
+
+def send_response(response):
+    content = json.dumps(response)
+    sys.stdout.write(f"Content-Length: {len(content)}\r\n\r\n{content}")
+    sys.stdout.flush()
+
+# Respond to initialize
+send_response({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+        "capabilities": {
+            "completionProvider": {},
+            "hoverProvider": True
+        }
+    }
+})
+#+end_src
+
+** Testing the Current Merger
+Your merger test needs real implementation:
+
+#+begin_src haskell-ts
+spec :: Spec
+spec = do
+  describe "Lsp.Merger.mergeLspInitMessages" $ do
+    it "merges two servers with different capabilities" $ do
+      let merged = mergeLspInitMessages ["hls", "typo"] [hlsResponse, typoResponse]
+          mergedValue = parseJson <$> merged
+      
+      -- Check structure is preserved
+      mergedValue `shouldSatisfy` isJust
+      
+      -- Check both server capabilities are present
+      let caps = mergedValue >>= extractCapabilities
+      caps `shouldSatisfy` \c -> 
+        "codeActionProvider" `elem` c &&  -- from both
+        "completionProvider" `elem` c &&  -- from hls
+        "positionEncoding" `elem` c       -- from both
+    
+    it "handles conflicting capabilities" $ do
+      -- Test what happens when servers have different values for same capability
+      pending "Implement conflict resolution strategy"
+#+end_src
+
+* Recommended Testing Priority
+
+1. [#A] Fix the merger test to actually verify merging
+2. [#A] Extract pure functions from processClientReader/processServerReader
+3. [#B] Create mock handles for basic flow testing
+4. [#B] Add property tests for merge logic
+5. [#C] Build integration test with mock server
+
+* Test Coverage Goals
+- [ ] 80% coverage on pure functions
+- [ ] 50% coverage on effectful functions
+- [ ] Key scenarios covered in integration tests

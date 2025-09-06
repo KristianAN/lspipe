@@ -1,7 +1,179 @@
-* TODO Deduplication of requests from lsp servers
+#+TITLE: lspipe Implementation Plan
+#+AUTHOR: KristianAN
+#+DATE: 2025-09-05
+#+STARTUP: overview
 
-* TODO LSP multiplexing
+* Project Overview
+Building an LSP proxy/multiplexer that allows a single client to communicate with multiple language servers, merging their capabilities and responses.
 
-* TODO Broker abstraction
+* Current Status [3/3]
+- [X] Basic proxy architecture with async message passing
+- [X] Process management for multiple LSP servers
+- [X] Capability extraction from servers during initialization
+- [X] Merging of initialization messages (~mergeLspInitMessages~)
+- [X] Basic message routing (broadcast to all servers)
+- [X] Queue overflow handling with "Server Busy" responses
 
-It's very rough and manual with TQueue and TBQueue in the proxy right now, making it rather hard to reason about. I'd like to put this behind a broker abstraction
+* TODO Core Features to Implement
+** TODO Request/Response Correlation System [0/4] :HIGH:
+:PROPERTIES:
+:PRIORITY: A
+:END:
+*** Goal
+Track which requests go to which servers and correlate responses
+
+*** TODO Create request tracking data structures
+#+begin_src haskell-ts
+data RequestTracker = RequestTracker
+  { clientRequests :: TVar (Map RequestId [(AgentId, Maybe LspResponse)])
+  , serverRequests :: TVar (Map RequestId AgentId)
+  }
+#+end_src
+
+*** TODO Implement request ID generation/modification for server multiplexing
+*** TODO Add correlation logic in ~processClientReader~ to track outgoing requests
+*** TODO Modify ~processServerReader~ to correlate incoming responses
+
+** TODO Intelligent Message Routing [0/3] :MEDIUM:
+:PROPERTIES:
+:PRIORITY: B
+:END:
+*** Goal
+Route messages to appropriate servers based on capabilities
+
+*** TODO Create capability-based router
+#+begin_src haskell-ts
+data MessageRouter = MessageRouter
+  { routeByMethod :: LspMethod -> [Agent.LspAgent] -> [Agent.LspAgent]
+  , routeByCapability :: LspRequest -> [Agent.LspAgent] -> [Agent.LspAgent]
+  }
+#+end_src
+
+*** TODO Implement routing logic for common LSP methods
+- ~textDocument/*~ methods based on file extensions
+- ~workspace/*~ methods (possibly broadcast)
+- Language-specific methods
+
+*** TODO Replace broadcast in ~processChannelToWriterAgents~ with intelligent routing
+
+** TODO Response Merging Strategy [0/3] :HIGH:
+:PROPERTIES:
+:PRIORITY: A
+:END:
+*** Goal
+Merge responses from multiple servers before sending to client
+
+*** TODO Implement response merging for different LSP methods [0/4]
+- [ ] Completion items (merge lists)
+- [ ] Diagnostics (merge by file)
+- [ ] Hover information (concatenate/prioritize)
+- [ ] Code actions (merge lists)
+
+*** TODO Add timeout mechanism for waiting on responses
+*** TODO Handle partial failures (some servers respond, others don't)
+
+** TODO Server-Initiated Request Handling [0/3] :MEDIUM:
+:PROPERTIES:
+:PRIORITY: B
+:END:
+*** Goal
+Properly route server-initiated requests to client and responses back
+
+*** TODO Separate server messages into categories
+- Responses to client requests
+- Server-initiated requests
+- Notifications
+
+*** TODO Implement response routing back to correct server
+*** TODO Handle conflicting server requests
+Example: multiple ~window/showMessage~ requests
+
+** TODO Notification Management [0/2] :LOW:
+:PROPERTIES:
+:PRIORITY: C
+:END:
+*** Goal
+Handle notifications efficiently
+
+*** TODO Decide on notification strategy
+- Fan-out all notifications
+- De-duplicate similar notifications
+- Priority-based notification handling
+
+*** TODO Implement notification filtering/merging
+
+* Implementation Schedule
+** Phase 1: Foundation [0/3]
+DEADLINE: <2025-09-12>
+*** TODO Clean up syntax errors (lines 203-204)
+*** TODO Add RequestTracker data structure
+*** TODO Implement basic request ID tracking
+
+** Phase 2: Core Logic [0/3]
+SCHEDULED: <2025-09-13>--<2025-09-26>
+*** TODO Implement response correlation
+*** TODO Add response merging for critical methods (completion, hover)
+*** TODO Test with simple two-server setup
+
+** Phase 3: Routing [0/3]
+SCHEDULED: <2025-09-27>--<2025-10-02>
+*** TODO Implement capability-based routing
+*** TODO Add server-initiated request handling
+*** TODO Implement notification management
+
+** Phase 4: Polish [0/4]
+SCHEDULED: <2025-10-03>--<2025-10-09>
+*** TODO Add timeout handling
+*** TODO Implement error recovery
+*** TODO Add metrics/logging
+*** TODO Performance optimization
+
+* Testing Strategy [0/3]
+** TODO Unit tests for merging logic
+** TODO Integration tests with mock LSP servers
+** TODO Real-world test scenarios
+*** TypeScript + ESLint servers
+*** Rust analyzer + Clippy
+*** Multiple Python servers
+
+* Code Modifications Required
+** Lsp/Proxy.hs
+- Add RequestTracker to ~runApp~
+- Modify ~processClientReader~ for request tracking
+- Modify ~processServerReader~ for response correlation
+- Update ~processChannelToWriterAgents~ for routing
+
+** Lsp/Merger.hs (existing)
+- Add method-specific merge strategies
+- Implement timeout logic
+
+** New Files to Create
+*** TODO Lsp/Router.hs - Routing logic
+*** TODO Lsp/Tracker.hs - Request tracking
+*** TODO Lsp/ResponseMerger.hs - Response merging strategies
+
+* Technical Notes
+** Implementation Considerations
+- Consider using ~async~ with timeout for response collection
+- May need to rewrite request IDs to avoid conflicts between servers
+- Document which LSP methods are merged vs. first-wins vs. broadcast
+
+** Performance Targets
+- Added latency: <50ms
+- Memory overhead: <100MB per server
+- CPU usage: <5% idle
+
+* Success Criteria [0/5]
+- [ ] Can run with 2+ language servers simultaneously
+- [ ] Client receives merged completions from multiple servers
+- [ ] Server-initiated requests work correctly
+- [ ] No message loss or deadlocks
+- [ ] Performance acceptable (<50ms added latency)
+
+* References
+** LSP Specification
+- [[https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/][LSP 3.17 Specification]]
+
+** Related Projects
+- [[https://github.com/KristianAN/lspipe][lspipe repository]]
+- Similar projects for reference (if any)

@@ -5,6 +5,8 @@ import Data.Text qualified as T
 import Effectful.FileSystem.IO (Handle)
 import Effectful.Process (ProcessHandle)
 
+import Lsp.LspRequest qualified as LR
+
 data LspAgent = LspAgent
     { agentId :: T.Text
     , capabilities :: [T.Text]
@@ -12,6 +14,15 @@ data LspAgent = LspAgent
     , stdout :: Handle
     , procHandle :: ProcessHandle
     }
+
+fanOutToAgents :: LR.LspRequest -> [LspAgent] -> Either String [LspAgent]
+fanOutToAgents request agents = do
+    let
+        requestMethod = LR.method request
+        capability = Map.lookup requestMethod method2capability
+     in
+        --    capability = method2capability.lookup requestMethod
+        Right []
 
 method2capability :: Map.Map String String
 method2capability =

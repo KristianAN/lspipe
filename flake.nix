@@ -43,7 +43,7 @@
             # enable = true;
             
             mkShellArgs = rec {
-              buildInputs = with pkgs; [typos-lsp];
+              buildInputs = with pkgs; [typos-lsp ghciwatch];
               # LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
             };
 
