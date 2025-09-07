@@ -11,3 +11,6 @@ clean:
 
 nix:
 	nix build .#lspipe
+
+watch:
+	ghciwatch --command "cabal v2-repl lib:lspipe" --watch lib

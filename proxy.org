@@ -1,0 +1,152 @@
+* Explanation of how the proxy is set up to work
+
+Adding new core data types to make the proxy easier to reason about
+
+** Core data types
+
+#+begin_src haskell-ts
+  -- Handles of the client, put in a datastructure to more easily distinguish
+  data ClientHandles = MkClientHandles
+      { inputHandle :: Handle
+      , outputHandle :: Handle
+      }
+
+  -- The ID of an agent. An agent is in most cases a LSP server, but it could be whatever we decide to connect against. In any case it must implement the LSP protocol
+  newtype AgentId = AgentId T.Text
+
+  -- The ID of a request. Requests sent over the LSP protocol without ID are notifications. We don't care that much about those for now
+  newtype RequestId = RequestId T.Text
+
+  -- DataType to hold pending responses in the buffer. Once the size of agents and responses are equal the responses are no longer peding and can be merged into a single response that is sent to the client
+  data PendingLspResponse = MkPendingLspResponse
+      { initalRequest :: LspRequest
+      , agents :: [AgentId]
+      , responses :: [LspResponse]
+      }
+
+  -- This buffer holds responses from the agents for some given request for the client. The requests from the client fan out to agents with the corresponding capability. As such we must keep track of which agents got the request so that we can merge the response once we have all responses.
+
+  newtype AgentResponseBuffer = AgentResponseBuffer (TVar (Map.Map RequestId PendingLspResponse))
+
+  newtype ClientResponseBuffer = ClientResponseBuffer (TVar (Map.Map RequestId AgentId))
+
+  data AgentTaggedLspRequest = MkAgentTaggedLspRequest {
+    taggedReq :: LspRequest, taggedAgents :: [AgentId]
+                                                       }
+                                                       
+  -- Requests made from the client to the agents are put in this queue, the requests must fan out based on capabilites
+  -- fanned out requests are put into the AgentResponseBuffer container
+  newtype ClientToAgentsRequestQ = ClientToAgentsRequestQ (TBQueue AgentTaggedLspRequest)
+
+  -- Responses must be put in some AgentResponseBuffer and when criteria is hit the response is merged and put into this queue
+  newtype AgentToClientResponseQ = AgentToClientResponseQ (TBQueue LspResponse)
+
+  -- Request from the agents to the client is put in this queue, must be tracked somehow by agent and request id
+  newtype AgentToClientRequestQ = AgentToClientRequestQ (TBQueue LspReq.LspRequest)
+  
+  data AgentTaggedClientLspResponse = MkAgentTaggedLspResponse { taggedRes :: LspResponse , taggedAgent :: AgentId }
+  -- Responses from the client to the agents must be put here. We need to make sure we only reply to the correct agent
+  newtype ClientToAgentResponseQ = ClientToAgentResponseQ (TBQueue AgentTaggedClientLspResponse)
+
+  data ParsedLspMessage = ParsedRequest LspReuest | ParsedResponse LspResponse
+#+end_src
+
+** Application dataflow Client Request Agent Response
+The flow after Lspipe has started all agents, i.e. the request flow.
+ 1. Client sends a request to lspipe
+ 2. Lspipe checks which agents the requests will be fanned out to
+ 3. Lspipe creates a PendingLspResponse with the initial request and the id of the agents it fans out to
+ 4. Lspipe puts the PendingLspResponse into the AgentResponseBuffer
+ 5. Lspipe fans out the requests to the agents by putting tagged requests in the ClientToAgentRequestQ
+ 6. lspipe reads ClientToAgentsRequestQ and sends message to agents
+ 7. The agents respond to lspipe, the responses are put into the AgentToClientResponseQ
+ 8. Lspipe reads from the AgentToClientResponseQ and populates the AgentResponseBuffer.
+ 9. Lspipe watches AgentResponseBuffer and merges the responses
+ 10. Lspipe sends merged responses to the client
+
+** Application dataflow Agent Request Client Response
+
+ I. Agent sends request to lspipe
+ II. Lspipe puts request into ClientResponseBuffer
+ III. Lspipe puts request into AgentToClientRequestQ
+ IV. Lspipe reads AgentToClientRequestQ and sends the request to the client
+ V. client responds
+ VI. lspipe reads response gets the id from the ClientResponseBuffer
+ VII. lspipe puts tagged response into the ClientToAgentResponseQ
+ VIII. lspipe reads ClientToAgentResponseQ and responds to agents
+     
+pseudo code for steps 2, 3, 4, 5, VI, VII
+pseudo code for steps 7, 8, II, III,
+#+begin_src haskell-ts
+  getPendingResponse ...
+  completePendingLspResponse ...
+  mergeAndQueueResponse ...
+  removeFromBuffer ...
+  updatePendingRespInBuffer ...
+
+  mergeLspResponses :: [LspResponse] -> LspResponse
+  mergeLspResponses = undefined
+  
+  -- whenever a new request is added to the AgentResponseBuffer this function is called and we check 
+  processLspResponseBuffer :: LspResponse -> AgentResponseBuffer -> AgentToClientResponseQ -> Eff es ()
+  processLspResponseBuffer resp arb aToCRQ = do
+    pendingLspResponse <- getPendingResponse arb reqId
+    if completePendingLspResponse pendingLspResponse then do
+      mergeAndQueueResponse pendingLspResponse aToCRQ
+      removeFromBuffer arb reqId
+    else updatePendingRespInBuffer arb pendingLspResponse resp
+
+  agentsToClientMessageProcessor :: (Logger :> es, Error LspError :> es, Concurrent :> es) => [Agent] -> AgentResponseBuffer -> AgentToClientRequestQ -> Eff es ()
+  agentsToClientMessageProcessor = undefined
+    
+
+#+end_src
+
+pseudo code for steps 2, 3, 4, 5, VI, VII
+#+begin_src haskell-ts
+  findCapableAgents :: LspRequest -> [Agent] -> [Agent]
+  findCapableAgents = undefined
+
+  addToAgentResponseBuffer :: (Concurrent :> es) => AgentResponseBuffer -> PendingLspResponse -> Eff es ()
+  addToAgentResponseBuffer = undefined
+
+  addToClientToAgentsRequestQ :: (Concurrent :> es) => ClientToAgentsRequestQ -> AgentTaggedLspRequest -> Eff es ()
+  addToClientToAgentsRequestQ = undefined
+
+  getAgentIdFromClientResponseBuffer :: (Concurrent :> es) => ClientResponseBuffer -> LspResponse -> Eff es ()
+  getAgentIdFromClientResponseBuffer = undefined
+
+  addToClientToAgentsResponseQ :: (Concurrent :> es) => ClientToAgentResponseQ -> AgentTaggedClientLspResponse -> Eff es ()
+  addToClientToAgentsResponseQ = undefined
+
+  handleClientToAgentRequest :: (Logger :> es, Error LspError :> es, Concurrent :> es) => ClientHandles -> [Agent] -> ClientToAgentRequestQ -> AgentResponseBuffer -> LspRequest -> Eff es ()
+  handleClientToAgentRequest clientHandles agents cTaReqQ arb req = do
+      addToAgentResponseBuffer arb initialPendingLspResp
+      addToClientToAgentsRequestQ cTaReqQ agentTaggedLspRequest
+    where
+      capableAgents = findCapableAgents req agents
+      taggedAgents' = map agentId capableAgents
+      agentTaggedLspRequest = MkAgentTaggedLspRequest{taggedReq = req, taggedAgents = taggedAgents'}
+      initialPendingLspResp = MkPendingLspResponse{initalRequest = req, agents = taggedAgents', responses = []}
+
+  handleClientToAgentResponse :: ClientToAgentResponseQ -> ClientResponseBuffer -> LspResponse -> Eff es ()
+  handleClientToAgentResponse cTaRespQ crb resp = do
+      agentId <- getAgentIdFromClientResponseBuffer crb resp
+      addToClientToAgentsResponseQ taggedLspResponse
+    where
+      taggedLspResponse = MkAgentTaggedLspResponse{taggedRes = resp, taggedAgent = agentId}
+
+  clientToAgentMessageProcessor :: (Logger :> es, Error LspError :> es, Concurrent :> es) => ClientHandles -> [Agent] ClientToAgentRequestQ -> ClientToAgentResponseQ -> AgentResponseBuffer -> ClientResponseBuffer -> Eff es ()
+  clientToAgentMessageProcessor clientHandles agents cTaReqQ cTaRespQ arb crb = do
+      message <- rpcRead $ inputHandle clientHandles
+      _ <- case parseMessage of
+          ParsedRequest req -> handleClientToAgentRequest clientHandles agents cTaReqQ arb req
+          ParsedResponse resp -> handleClientToAgentResponse cTaRespQ crb resp
+      clientToAgentMessageProcessor clientHandles cTaReqQ cTaRespQ arb crb
+#+end_src
+
+common shared code for both data flows
+#+begin_src haskell-ts
+  parseMessage :: T.Text -> ParsedLspMessage
+  parseMessage = undefined
+#+end_src
