@@ -27,13 +27,12 @@ library
     Cli
     Lsp.LspResponse
     Lsp.Merger
-  other-modules:
     Lsp.LspRequest
+    Lsp.Agent
+  other-modules:
     Lsp.Rpc
     Lsp.Proxy
-    Lsp.Agent
     Util.Logger
-
     
 executable lspipe
     import:           settings
@@ -52,8 +51,11 @@ test-suite lspipe-tests
   other-modules:
      Lsp.LspResponseSpec
      Lsp.MergerSpec
+     Lsp.AgentSpec
   build-depends:
       base
+    , containers
+    , vector
     , text
     , aeson
     , bytestring

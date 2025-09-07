@@ -10,6 +10,7 @@ import Data.Foldable (foldl')
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import GHC.Generics
+import Lsp.LspResponse qualified as LSPR
 import Prelude hiding (id)
 
 maybeObject :: Value -> Maybe Object
@@ -41,6 +42,12 @@ instance FromJSON LspResult
 instance ToJSON LspResult
 instance FromJSON ServerInfo
 instance ToJSON ServerInfo
+
+type LspResponseMergeError = String
+
+-- | merge multiple LSP responses (of the same id) into one common response
+mergeLspResponses :: [LSPR.LspResponse] -> Either LspResponseMergeError LSPR.LspResponse
+mergeLspResponses = undefined -- TODO implement merging strategy | complex task
 
 -- | Merge multiple LSP initialization messages
 mergeLspInitMessages :: [T.Text] -> [Value] -> Maybe T.Text

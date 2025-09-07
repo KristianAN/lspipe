@@ -1,4 +1,6 @@
-module Lsp.Agent (LspAgent (..), method2capability) where
+{-# LANGUAGE OverloadedStrings #-}
+
+module Lsp.Agent (LspAgent (..), method2capability, fanOutToAgents) where
 
 import Data.Map qualified as Map
 import Data.Text qualified as T
@@ -15,14 +17,24 @@ data LspAgent = LspAgent
     , procHandle :: ProcessHandle
     }
 
+instance Show LspAgent where
+    show (LspAgent aid caps _ _ _) =
+        "Agent id: "
+            <> (T.unpack aid)
+            <> ". Capabilities: "
+            <> (T.unpack (T.intercalate (T.pack ", ") caps))
+
+instance Eq LspAgent where
+    a == b = agentId a == agentId b && capabilities a == capabilities b
+
 fanOutToAgents :: LR.LspRequest -> [LspAgent] -> Either String [LspAgent]
-fanOutToAgents request agents = do
-    let
-        requestMethod = LR.method request
-        capability = Map.lookup requestMethod method2capability
-     in
-        --    capability = method2capability.lookup requestMethod
-        Right []
+fanOutToAgents request agents =
+    maybe
+        (Left $ "No registered capability for method: " <> (T.unpack requestMethod))
+        (\capability -> Right $ filter (\agent -> elem (T.pack capability) (capabilities agent)) agents)
+        (Map.lookup (T.unpack requestMethod) method2capability)
+  where
+    requestMethod = LR.method request
 
 method2capability :: Map.Map String String
 method2capability =
