@@ -30,10 +30,11 @@ Adding new core data types to make the proxy easier to reason about
 
   newtype ClientResponseBuffer = ClientResponseBuffer (TVar (Map.Map RequestId AgentId))
 
-  data AgentTaggedLspRequest = MkAgentTaggedLspRequest {
-    taggedReq :: LspRequest, taggedAgents :: [AgentId]
-                                                       }
-                                                       
+  data AgentTaggedLspRequest = MkAgentTaggedLspRequest
+      { taggedReq :: LspRequest
+      , taggedAgents :: [AgentId]
+      }
+
   -- Requests made from the client to the agents are put in this queue, the requests must fan out based on capabilites
   -- fanned out requests are put into the AgentResponseBuffer container
   newtype ClientToAgentsRequestQ = ClientToAgentsRequestQ (TBQueue AgentTaggedLspRequest)
@@ -43,8 +44,9 @@ Adding new core data types to make the proxy easier to reason about
 
   -- Request from the agents to the client is put in this queue, must be tracked somehow by agent and request id
   newtype AgentToClientRequestQ = AgentToClientRequestQ (TBQueue LspReq.LspRequest)
-  
-  data AgentTaggedClientLspResponse = MkAgentTaggedLspResponse { taggedRes :: LspResponse , taggedAgent :: AgentId }
+
+  data AgentTaggedClientLspResponse = MkAgentTaggedLspResponse {taggedRes :: LspResponse, taggedAgent :: AgentId}
+
   -- Responses from the client to the agents must be put here. We need to make sure we only reply to the correct agent
   newtype ClientToAgentResponseQ = ClientToAgentResponseQ (TBQueue AgentTaggedClientLspResponse)
 
@@ -78,28 +80,33 @@ The flow after Lspipe has started all agents, i.e. the request flow.
 pseudo code for steps 2, 3, 4, 5, VI, VII
 pseudo code for steps 7, 8, II, III,
 #+begin_src haskell-ts
-  getPendingResponse ...
-  completePendingLspResponse ...
-  mergeAndQueueResponse ...
-  removeFromBuffer ...
-  updatePendingRespInBuffer ...
-
   mergeLspResponses :: [LspResponse] -> LspResponse
   mergeLspResponses = undefined
-  
-  -- whenever a new request is added to the AgentResponseBuffer this function is called and we check 
+
+  -- whenever a new request is added to the AgentResponseBuffer this function is called and we check
   processLspResponseBuffer :: LspResponse -> AgentResponseBuffer -> AgentToClientResponseQ -> Eff es ()
   processLspResponseBuffer resp arb aToCRQ = do
-    pendingLspResponse <- getPendingResponse arb reqId
-    if completePendingLspResponse pendingLspResponse then do
-      mergeAndQueueResponse pendingLspResponse aToCRQ
-      removeFromBuffer arb reqId
-    else updatePendingRespInBuffer arb pendingLspResponse resp
+      pendingLspResponse <- getPendingResponse arb reqId
+      if completePendingLspResponse pendingLspResponse
+          then do
+              mergeAndQueueResponse pendingLspResponse aToCRQ
+              removeFromBuffer arb reqId
+          else updatePendingRespInBuffer arb pendingLspResponse resp
 
-  agentsToClientMessageProcessor :: (Logger :> es, Error LspError :> es, Concurrent :> es) => [Agent] -> AgentResponseBuffer -> AgentToClientRequestQ -> Eff es ()
-  agentsToClientMessageProcessor = undefined
-    
+  addToAgentToClientRequestQ :: (Concurrent :> es) => LspRequest -> AgentToClientRequestQ -> Eff es ()
+  addToAgentToClientRequestQ = undefined
 
+  agentsToClientMessageProcessor :: (Logger :> es, Error LspError :> es, Concurrent :> es) => [Agent] -> AgentResponseBuffer -> AgentToClientRequestQ -> AgentToClientResponseQ -> Eff es ()
+  agentsToClientMessageProcessor agents arb aToCReqQ aToCRespQ = do
+      traverse
+          ( \agent -> do
+              message <- rpcRead (stdout agent)
+              case parseMessage message of
+                  ParsedRequest req -> addToAgentToClientRequestQ req aToCReqQ
+                  ParsedResponse resp -> processLspResponseBuffer resp arb aToRespQ
+          )
+          agents
+      agentsToClientMessageProcessor agents arb aToCReqQ aToCRespQ
 #+end_src
 
 pseudo code for steps 2, 3, 4, 5, VI, VII
