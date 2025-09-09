@@ -13,92 +13,45 @@ Lspipe aims to bring multi-lsp support for clients that only support one lsp per
 * Status
 Extremely WIP. Don't expect anything to work correctly yet. Currently capable of being a proxy for one lsp.
 
-* Architecture
-
-#+begin_src mermaid
-  graph TD
-    Client[LSP Client<br/>e.g., Emacs]
-
-    subgraph LSPIPE["LSPIPE Multiplexer"]
-        ClientToServer[Client→Server Queue<br/>STM TBQueue<br/>Bounded]
-        ServerToClient[Server→Client Queue<br/>STM TQueue<br/>Unbounded]
-        BackPressure{Backpressure<br/>Check}
-        BusyResponse[Server Busy<br/>Response]
-    end
-
-    subgraph Agents["LSP Agents"]
-        Agent1[Agent 1<br/>LSP Server]
-        Agent2[Agent 2<br/>LSP Server]
-        Agent3[Agent N<br/>LSP Server]
-    end
-
-    Client -->|LSP Request| BackPressure
-    BackPressure -->|Queue Full| BusyResponse
-    BusyResponse -->|Error Response| Client
-    BackPressure -->|Queue Available| ClientToServer
-    
-    ClientToServer -->|Fan-out| Agent1
-    ClientToServer -->|Fan-out| Agent2
-    ClientToServer -->|Fan-out| Agent3
-
-    Agent1 -->|Response| ServerToClient
-    Agent2 -->|Response| ServerToClient
-    Agent3 -->|Response| ServerToClient
-
-    ServerToClient -->|Fan-in| Client
-#+end_src
-
-Lspipe uses Haskell STM queues with different characteristics for each direction:
-- *Client→Server*: Bounded `TBQueue` (capacity: 128) for backpressure control
-- *Server→Client*: Unbounded `TQueue` for responsive server communication
-
-Each LSP server runs as an independent Agent. The client-to-server queue fans out to all agents via multiple handles, while server responses fan in through a shared unbounded queue.
+* Architecture - Data flow
 
 #+begin_src mermaid
 sequenceDiagram
-    participant C as LSP Client
-    participant L as LSPIPE
-    participant Q1 as Client→Server Queue
+    participant C as Client
+    participant P as LSP Proxy
     participant A1 as Agent 1
     participant A2 as Agent 2
-    participant Q2 as Server→Client Queue
-
-    C->>L: LSP Request (ID: 123)
     
-    alt Queue has capacity
-        L->>Q1: Check capacity & enqueue
-        Note over Q1: TBQueue (bounded)
-        Q1->>A1: Forward request
-        Q1->>A2: Forward request
-        
-        A1->>Q2: Response (ID: 123)
-        A2->>Q2: Response (ID: 123)
-        Note over Q2: TQueue (unbounded)
-        
-        Q2->>L: Read responses
-        L->>C: Forward responses
-        
-    else Queue is full (backpressure)
-        alt Request has ID
-            L->>C: Server Busy Error (ID: 123)
-        else Request has no ID (notification)
-            Note over L: Block until queue available
-            L->>Q1: Enqueue when space available
-        end
+    Note over C,A2: Client Request → Agent Response Flow
+    C->>P: 1. Send Request (ID: 123)
+    P->>P: 2. findCapableAgents()
+    P->>P: 3. Create PendingLspResponse
+    P->>P: 4. Store in AgentResponseBuffer
+    P->>P: 5. Queue in ClientToAgentsRequestQ
+    par Fan out to capable agents
+        P->>A1: 6. Forward Request (ID: 123)
+    and
+        P->>A2: 6. Forward Request (ID: 123)
     end
+    A1->>P: 7. Response (ID: 123)
+    P->>P: 8. Update AgentResponseBuffer
+    A2->>P: 7. Response (ID: 123)
+    P->>P: 8. Update AgentResponseBuffer
+    P->>P: 9. Check if complete → Merge
+    P->>C: 10. Send merged response (ID: 123)
+    
+    Note over C,A2: ─────────────────────────────
+    Note over C,A2: Agent Request → Client Response Flow
+    A1->>P: I. Send Request (ID: 456)
+    P->>P: II. Store in ClientResponseBuffer
+    P->>P: III. Queue in AgentToClientRequestQ
+    P->>C: IV. Forward Request (ID: 456)
+    C->>P: V. Response (ID: 456)
+    P->>P: VI. Lookup Agent in ClientResponseBuffer
+    P->>P: VII. Queue tagged response
+    P->>A1: VIII. Route Response (ID: 456)
 #+end_src
 
-The backpressure mechanism works as follows:
-- When the client-to-server queue is full, LSPIPE checks if the request has an ID
-- *Requests with ID*: Immediately respond with "Server Busy" error to maintain client responsiveness  
-- *Notifications (no ID)*: Block until queue space becomes available, since they don't expect responses
-- Server-to-client communication uses unbounded queues to prevent response blocking
-
-This design ensures that:
-1. Slow agents cannot overwhelm the system due to bounded client queues
-2. The client receives immediate feedback when the system is under load
-3. Server responses are never blocked, maintaining system responsiveness
-4. Non-critical notifications don't cause client timeouts
 
 * Build/Develop
 ** Nix develop
