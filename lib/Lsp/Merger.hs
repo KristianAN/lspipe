@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Lsp.Merger (mergeLspInitMessages) where
+module Lsp.Merger (mergeLspInitMessages, mergeLspResponses) where
 
 import Data.Aeson
 import Data.Aeson.Extra.Merge
