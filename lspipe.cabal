@@ -23,15 +23,16 @@ library
     , aeson-extra
     , optparse-applicative
     , time
+    , lsp-types
+    , lens
   exposed-modules:
     Cli
-    Lsp.LspResponse
     Lsp.Merger
-    Lsp.LspRequest
     Lsp.Agent
   other-modules:
     Lsp.Rpc
     Lsp.Proxy
+    Lsp.Queues
     Util.Logger
     
 executable lspipe

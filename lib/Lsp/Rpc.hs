@@ -48,6 +48,7 @@ rpcRead handle = recur Nothing
                         Just len -> readBody handle len
                         Nothing -> throwError $ LspError "Separator line (\\r\\n) encountered before Content-Length header"
                     else parseHeaderLine lineStr contentLength
+
     parseHeaderLine :: (FileSystem :> es, Error LspError :> es) => BSC.ByteString -> Maybe Int -> Eff es T.Text
     parseHeaderLine lineStr mContentLength = do
         let line = TE.decodeUtf8 lineStr
@@ -71,15 +72,15 @@ rpcRead handle = recur Nothing
 rpcWrite :: (FileSystem :> es, Error LspError :> es) => Handle -> T.Text -> Eff es ()
 rpcWrite handle content = do
     let contentBytes = TE.encodeUtf8 content
-    let contentLength = BSC.length contentBytes
-    let headerLine = BSC.pack $ "Content-Length: " ++ show contentLength ++ "\r\n"
-    let separatorLine = BSC.pack "\r\n"
+        contentLength = BSC.length contentBytes
+        headerLine = BSC.pack $ "Content-Length: " ++ show contentLength ++ "\r\n"
+        separatorLine = BSC.pack "\r\n"
 
     -- Actions that can throw IOException
     let ioActions = do
-            BS.hPut handle headerLine
-            BS.hPut handle separatorLine
-            BS.hPut handle contentBytes
+            _ <- BS.hPut handle headerLine
+            _ <- BS.hPut handle separatorLine
+            _ <- BS.hPut handle contentBytes
             hFlush handle
 
     eResult <- try @IOException ioActions

@@ -6,17 +6,22 @@ import Effectful.Error.Static
 import Effectful.FileSystem
 import Effectful.FileSystem.IO (stdin, stdout)
 import Effectful.Process
-import Lsp.Proxy (Command (..), runApp)
+
 import Lsp.Rpc (LspError)
 import Options.Applicative qualified as OA
 import System.Exit (exitFailure, exitWith)
 import System.IO (hPutStrLn, stderr)
 import Util.Logger
 
+-- | Command to start a LSP Agent/Server
+data Command = Command {command :: String, args :: [String]}
+
 data Lspipe = Lspipe
     { servers :: [Command]
     , debug :: Bool
     }
+
+runApp = undefined
 
 lspipe :: OA.Parser Lspipe
 lspipe = Lspipe <$> OA.many (fmap toCommand (OA.strOption (OA.long "server" <> OA.metavar "SERVER" <> OA.help "Servers to launch"))) <*> OA.switch (OA.long "debug" <> OA.help "Turn on debug logging")

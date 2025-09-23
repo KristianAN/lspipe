@@ -1,105 +1,69 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
-module Lsp.Agent (LspAgent (..), method2capability, fanOutToAgents) where
+module Lsp.Agent (Agent (..), fanOutToAgents, findCapableAgents) where
 
-import Data.Map qualified as Map
+import Control.Lens ((^?), _Just)
 import Data.Text qualified as T
 import Effectful.FileSystem.IO (Handle)
 import Effectful.Process (ProcessHandle)
+import Language.LSP.Protocol.Capabilities
+import Language.LSP.Protocol.Message
+import Language.LSP.Protocol.Types
 
-import Lsp.LspRequest qualified as LR
-
-data LspAgent = LspAgent
+-- Your existing Agent type remains the same
+data Agent = Agent
     { agentId :: T.Text
-    , capabilities :: [T.Text]
+    , capabilities :: ServerCapabilities -- Changed to use proper LSP type
     , stdin :: Handle
     , stdout :: Handle
     , procHandle :: ProcessHandle
     }
 
-instance Show LspAgent where
-    show (LspAgent aid caps _ _ _) =
-        "Agent id: "
-            <> (T.unpack aid)
-            <> ". Capabilities: "
-            <> (T.unpack (T.intercalate (T.pack ", ") caps))
+instance Show Agent where
+    show (Agent aid _ _ _ _) =
+        "Agent id: " <> T.unpack aid
 
-instance Eq LspAgent where
-    a == b = agentId a == agentId b && capabilities a == capabilities b
+instance Eq Agent where
+    a == b = agentId a == agentId b
 
-fanOutToAgents :: LR.LspRequest -> [LspAgent] -> Either String [LspAgent]
-fanOutToAgents request agents =
-    maybe
-        (Left $ "No registered capability for method: " <> (T.unpack requestMethod))
-        (\capability -> Right $ filter (\agent -> elem (T.pack capability) (capabilities agent)) agents)
-        (Map.lookup (T.unpack requestMethod) method2capability)
-  where
-    requestMethod = LR.method request
+-- Check if an agent supports a specific method
+agentSupportsMethod :: SMethod m -> Agent -> Bool
+agentSupportsMethod method agent =
+    case getMethodCapability method (capabilities agent) of
+        Nothing -> False
+        Just _ -> True
 
-method2capability :: Map.Map String String
-method2capability =
-    Map.fromList
-        [ -- notifications
-          ("initialized", "*")
-        , ("workspace/didChangeConfiguration", "*")
-        , ("textDocument/didOpen", "textDocumentSync")
-        , ("textDocument/didChange", "textDocumentSync")
-        , ("textDocument/willSave", "textDocumentSync.willSave")
-        , ("textDocument/didSave", "textDocumentSync.save")
-        , ("textDocument/didClose", "textDocumentSync")
-        , ("workspace/didCreateFiles", "workspace.fileOperations.didCreate")
-        , ("workspace/willRenameFiles", "workspace.fileOperations.willRename")
-        , ("workspace/didRenameFiles", "workspace.fileOperations.didRename")
-        , ("workspace/willDeleteFiles", "workspace.fileOperations.willDelete")
-        , ("workspace/didDeleteFiles", "workspace.fileOperations.didDelete")
-        , ("workspace/didChangeWorkspaceFolders", "workspace.workspaceFolders.changeNotifications")
-        , ("workspace/willCreateFiles", "workspace.fileOperations.willCreate")
-        , -- requests
-          ("textDocument/willSaveWaitUntil", "textDocumentSync.willSaveWaitUntil")
-        , ("textDocument/declaration", "declarationProvider")
-        , ("textDocument/definition", "definitionProvider")
-        , ("textDocument/typeDefinition", "typeDefinitionProvider")
-        , ("textDocument/implementation", "implementationProvider")
-        , ("textDocument/references", "referencesProvider")
-        , ("textDocument/prepareCallHierarchy", "callHierarchyProvider")
-        , ("callHierarchy/incomingCalls", "callHierarchyProvider")
-        , ("callHierarchy/outgoingCalls", "callHierarchyProvider")
-        , ("textDocument/prepareTypeHierarchy", "typeHierarchyProvider")
-        , ("typeHierarchy/supertypes", "textDocument/prepareTypeHierarchy")
-        , ("typeHierarchy/subtypes", "textDocument/prepareTypeHierarchy")
-        , ("textDocument/documentHighlight", "documentHighlightProvider")
-        , ("textDocument/documentLink", "documentLinkProvider")
-        , ("documentLink/resolve", "documentLinkProvider")
-        , ("textDocument/hover", "hoverProvider")
-        , ("textDocument/codeLens", "codeLensProvider")
-        , ("codeLens/resolve", "codeLensProvider")
-        , ("textDocument/foldingRange", "foldingRangeProvider")
-        , ("textDocument/selectionRange", "selectionRangeProvider")
-        , ("textDocument/documentSymbol", "documentSymbolProvider")
-        , ("textDocument/semanticTokens/full", "semanticTokensProvider")
-        , ("textDocument/semanticTokens/delta", "semanticTokensProvider")
-        , ("textDocument/semanticTokens/range", "semanticTokensProvider")
-        , ("textDocument/inlayHint", "inlayHintProvider")
-        , ("inlayHint/resolve", "inlayHintProvider")
-        , ("textDocument/inlineValue", "inlineValueProvider")
-        , ("textDocument/moniker", "monikerProvider")
-        , ("textDocument/completion", "completionProvider")
-        , ("completionItem/resolve", "completionProvider")
-        , ("textDocument/diagnostic", "diagnosticProvider")
-        , ("workspace/diagnostic", "diagnosticProvider")
-        , ("textDocument/signatureHelp", "signatureHelpProvider")
-        , ("textDocument/codeAction", "codeActionProvider")
-        , ("codeAction/resolve", "codeActionProvider")
-        , ("textDocument/documentColor", "colorProvider")
-        , ("textDocument/colorPresentation", "colorProvider")
-        , ("textDocument/formatting", "documentFormattingProvider")
-        , ("textDocument/rangeFormatting", "documentRangeFormattingProvider")
-        , ("textDocument/onTypeFormatting", "documentOnTypeFormattingProvider")
-        , ("textDocument/rename", "renameProvider")
-        , ("textDocument/prepareRename", "renameProvider")
-        , ("textDocument/linkedEditingRange", "linkedEditingRangeProvider")
-        , ("workspace/symbol", "workspaceSymbolProvider")
-        , ("workspaceSymbol/resolve", "workspaceSymbolProvider")
-        , ("workspace/workspaceFolders", "workspace.workspaceFolders")
-        , ("workspace/executeCommand", "executeCommandProvider")
-        ]
+-- Extract the capability for a given method from ServerCapabilities
+getMethodCapability :: SMethod m -> ServerCapabilities -> Maybe (ServerCapability m)
+getMethodCapability method caps =
+    caps ^? serverCapability method . _Just
+
+-- Find agents capable of handling a specific client method
+findCapableAgents :: SomeClientMethod -> [Agent] -> [Agent]
+findCapableAgents (SomeClientMethod method) agents =
+    filter (agentSupportsMethod method) agents
+
+-- Fan out a request to capable agents
+fanOutToAgents :: SomeClientMethod -> [Agent] -> Either String [Agent]
+fanOutToAgents someMethod agents =
+    case findCapableAgents someMethod agents of
+        [] -> Left $ "No registered capability for method: " <> show someMethod
+        capableAgents -> Right capableAgents
+
+-- Helper to check if method requires special handling (like broadcast)
+isUniversalMethod :: SomeClientMethod -> Bool
+isUniversalMethod (SomeClientMethod method) =
+    case method of
+        SMethod_Initialized -> True
+        SMethod_WorkspaceDidChangeConfiguration -> True
+        _ -> False
+
+-- Alternative implementation that handles universal methods
+fanOutToAgentsWithUniversal :: SomeClientMethod -> [Agent] -> Either String [Agent]
+fanOutToAgentsWithUniversal someMethod agents =
+    if isUniversalMethod someMethod
+        then Right agents -- Send to all agents
+        else fanOutToAgents someMethod agents
